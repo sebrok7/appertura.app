@@ -1,0 +1,174 @@
+// admin/lib/services/admin_service.dart
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:supabase_flutter/supabase_flutter.dart';
+
+final adminServiceProvider = Provider<AdminService>((_) => AdminService());
+
+final adminAuthProvider = StreamProvider<User?>((ref) =>
+    Supabase.instance.client.auth.onAuthStateChange.map((e) => e.session?.user));
+
+final adminProfileProvider = FutureProvider((ref) async {
+  final user = ref.watch(adminAuthProvider).value;
+  if (user == null) return null;
+  final d = await Supabase.instance.client.from('profiles').select().eq('id', user.id).maybeSingle();
+  return d;
+});
+
+// ── Stats ─────────────────────────────────────────────────
+final statsProvider = FutureProvider((ref) async {
+  final res = await Supabase.instance.client.rpc('get_admin_stats');
+  return res as Map<String, dynamic>;
+});
+
+// ── Users ─────────────────────────────────────────────────
+final usersProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
+  final d = await Supabase.instance.client.from('profiles')
+      .select().order('created_at', ascending: false);
+  return (d as List).cast<Map<String, dynamic>>();
+});
+
+// ── Devices ───────────────────────────────────────────────
+final devicesProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
+  final d = await Supabase.instance.client.from('devices').select('''
+    *, parking_spaces(number, label,
+      parkings(name, communities(name)))
+  ''').order('created_at', ascending: false);
+  return (d as List).cast<Map<String, dynamic>>();
+});
+
+// ── Logs ──────────────────────────────────────────────────
+final logsProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
+  final d = await Supabase.instance.client.from('v_access_logs')
+      .select().order('created_at', ascending: false).limit(500);
+  return (d as List).cast<Map<String, dynamic>>();
+});
+
+// ── Parkings ──────────────────────────────────────────────
+final parkingsProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
+  final d = await Supabase.instance.client.from('parkings')
+      .select('*, communities(name)').order('name');
+  return (d as List).cast<Map<String, dynamic>>();
+});
+
+// ── Communities ───────────────────────────────────────────
+final communitiesProvider = FutureProvider<List<Map<String, dynamic>>>((ref) async {
+  final d = await Supabase.instance.client.from('communities').select().order('name');
+  return (d as List).cast<Map<String, dynamic>>();
+});
+
+class AdminService {
+  SupabaseClient get _db => Supabase.instance.client;
+  User? get currentUser => _db.auth.currentUser;
+
+  // Auth
+  Future<void> signIn(String email, String password) =>
+      _db.auth.signInWithPassword(email: email, password: password);
+  Future<void> signOut() => _db.auth.signOut();
+
+  // Profile check
+  Future<bool> isAdmin() async {
+    final d = await _db.from('profiles').select('role').eq('id', currentUser!.id).single();
+    return ['admin', 'super_admin'].contains(d['role']);
+  }
+
+  // Users
+  Future<void> updateUserRole(String userId, String role) async {
+    await _db.from('profiles').update({'role': role}).eq('id', userId);
+  }
+
+  Future<void> suspendUser(String userId, String reason) async {
+    await _db.from('profiles').update({
+      'is_active': false, 'suspended_at': DateTime.now().toIso8601String(),
+      'suspended_reason': reason,
+    }).eq('id', userId);
+  }
+
+  Future<void> reactivateUser(String userId) async {
+    await _db.from('profiles').update({
+      'is_active': true, 'suspended_at': null, 'suspended_reason': null,
+    }).eq('id', userId);
+  }
+
+  Future<void> createUser(String email, String password, String fullName, String role) async {
+    final res = await _db.auth.admin.createUser(AdminUserAttributes(
+      email: email, password: password, emailConfirm: true,
+      userMetadata: {'full_name': fullName},
+    ));
+    if (res.user != null) {
+      await _db.from('profiles').update({'role': role, 'full_name': fullName}).eq('id', res.user!.id);
+    }
+  }
+
+  // Devices
+  Future<void> createDevice({
+    required String deviceId, String? bleName, String? spaceId, int relayMs = 500,
+  }) async {
+    await _db.from('devices').insert({
+      'device_id': deviceId,
+      'ble_name': bleName ?? 'APARKAO_$deviceId',
+      'space_id': spaceId, 'relay_pulse_ms': relayMs,
+    });
+  }
+
+  Future<void> updateDevice(String id, {String? bleName, int? relayMs, String? spaceId}) async {
+    await _db.from('devices').update({
+      if (bleName != null) 'ble_name': bleName,
+      if (relayMs != null) 'relay_pulse_ms': relayMs,
+      if (spaceId != null) 'space_id': spaceId,
+    }).eq('id', id);
+  }
+
+  Future<void> deactivateDevice(String id) async {
+    await _db.from('devices').update({'is_active': false}).eq('id', id);
+  }
+
+  // Permissions
+  Future<void> grantPermission({
+    required String userId, required String deviceId,
+    String type = 'permanent', DateTime? validUntil, int? maxUses,
+  }) async {
+    await _db.from('user_device_permissions').upsert({
+      'user_id': userId, 'device_id': deviceId, 'permission_type': type,
+      'valid_until': validUntil?.toIso8601String(),
+      'max_uses': maxUses, 'is_active': true, 'granted_by': currentUser?.id,
+    }, onConflict: 'user_id,device_id');
+  }
+
+  Future<void> revokePermission(String userId, String deviceId) async {
+    await _db.from('user_device_permissions')
+        .update({'is_active': false}).eq('user_id', userId).eq('device_id', deviceId);
+  }
+
+  Future<List<Map<String, dynamic>>> getDevicePermissions(String deviceId) async {
+    final d = await _db.from('user_device_permissions')
+        .select('*, profiles(full_name, email)').eq('device_id', deviceId).eq('is_active', true);
+    return (d as List).cast<Map<String, dynamic>>();
+  }
+
+  // Parkings
+  Future<void> createParking({
+    required String name, String? address, String? city, String? communityId,
+  }) async {
+    await _db.from('parkings').insert({
+      'name': name, 'address': address, 'city': city, 'community_id': communityId,
+    });
+  }
+
+  Future<void> createSpace({
+    required String parkingId, required String number, String? label, String? floor,
+  }) async {
+    await _db.from('parking_spaces').insert({
+      'parking_id': parkingId, 'number': number, 'label': label, 'floor': floor,
+    });
+  }
+
+  Future<List<Map<String, dynamic>>> getSpaces(String parkingId) async {
+    final d = await _db.from('parking_spaces').select()
+        .eq('parking_id', parkingId).eq('is_active', true).order('number');
+    return (d as List).cast<Map<String, dynamic>>();
+  }
+
+  Future<void> createCommunity({required String name, String? address, String? city}) async {
+    await _db.from('communities').insert({'name': name, 'address': address, 'city': city});
+  }
+}

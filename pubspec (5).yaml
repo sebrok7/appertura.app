@@ -1,0 +1,227 @@
+// admin/lib/screens/parkings/parkings_screen.dart
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../services/admin_service.dart';
+import '../../utils/theme.dart';
+import '../../widgets/admin_widgets.dart';
+
+class ParkingsScreen extends ConsumerStatefulWidget {
+  const ParkingsScreen({super.key});
+  @override ConsumerState<ParkingsScreen> createState() => _S();
+}
+
+class _S extends ConsumerState<ParkingsScreen> {
+  Map<String, dynamic>? _selectedParking;
+  List<Map<String, dynamic>> _spaces = [];
+  bool _loadingSpaces = false;
+
+  Future<void> _loadSpaces(String parkingId) async {
+    setState(() => _loadingSpaces = true);
+    _spaces = await ref.read(adminServiceProvider).getSpaces(parkingId);
+    if (mounted) setState(() => _loadingSpaces = false);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final parkings = ref.watch(parkingsProvider);
+    final communities = ref.watch(communitiesProvider);
+
+    return Scaffold(
+      backgroundColor: AC.bg,
+      appBar: AppBar(
+        title: Text(_selectedParking == null ? 'Parkings' : _selectedParking!['name']),
+        backgroundColor: AC.bg, elevation: 0, automaticallyImplyLeading: false,
+        leading: _selectedParking != null
+            ? IconButton(icon: const Icon(Icons.arrow_back_rounded, color: AC.text1),
+                onPressed: () => setState(() { _selectedParking = null; _spaces = []; }))
+            : null,
+        actions: [
+          IconButton(icon: const Icon(Icons.refresh_rounded, color: AC.text2),
+              onPressed: () { ref.invalidate(parkingsProvider); ref.invalidate(communitiesProvider); }),
+          const SizedBox(width: 8),
+          AdminGradientButton(
+            icon: Icons.add_rounded,
+            label: _selectedParking == null ? 'Nuevo parking' : 'Nueva plaza',
+            onPressed: () => _selectedParking == null
+                ? _addParking(context, communities.value ?? [])
+                : _addSpace(context, _selectedParking!['id']),
+          ),
+          const SizedBox(width: 16),
+        ],
+      ),
+      body: _selectedParking == null
+          ? _ParkingList(parkings: parkings, onSelect: (p) {
+              setState(() => _selectedParking = p);
+              _loadSpaces(p['id']);
+            })
+          : _SpaceList(
+              parking: _selectedParking!,
+              spaces: _spaces,
+              loading: _loadingSpaces,
+            ),
+    );
+  }
+
+  Future<void> _addParking(BuildContext ctx, List<Map<String, dynamic>> communities) async {
+    final name = TextEditingController();
+    final addr = TextEditingController();
+    final city = TextEditingController();
+    String? communityId;
+
+    await showDialog(context: ctx, builder: (_) => AlertDialog(
+      backgroundColor: AC.surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('Nuevo parking', style: TextStyle(color: AC.text1, fontFamily: 'SpaceGrotesk')),
+      content: SizedBox(width: 400, child: Column(mainAxisSize: MainAxisSize.min, children: [
+        AdminField(label: 'Nombre *', controller: name, prefixIcon: Icons.local_parking_rounded),
+        const SizedBox(height: 10),
+        AdminField(label: 'Dirección', controller: addr, prefixIcon: Icons.location_on_outlined),
+        const SizedBox(height: 10),
+        AdminField(label: 'Ciudad', controller: city, prefixIcon: Icons.location_city_rounded),
+        if (communities.isNotEmpty) ...[
+          const SizedBox(height: 10),
+          StatefulBuilder(builder: (_, ss) => DropdownButtonFormField<String>(
+            value: communityId, dropdownColor: AC.surface2,
+            decoration: const InputDecoration(labelText: 'Comunidad', filled: true, fillColor: AC.surface2,
+                border: OutlineInputBorder()),
+            style: const TextStyle(color: AC.text1, fontFamily: 'SpaceGrotesk'),
+            items: communities.map((c) => DropdownMenuItem<String>(
+                value: c['id'], child: Text(c['name'] ?? '—'))).toList(),
+            onChanged: (v) => ss(() => communityId = v),
+          )),
+        ],
+      ])),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancelar', style: TextStyle(color: AC.text2))),
+        AdminGradientButton(label: 'Crear', onPressed: () async {
+          if (name.text.isEmpty) return;
+          await ref.read(adminServiceProvider).createParking(
+            name: name.text.trim(), address: addr.text.trim(),
+            city: city.text.trim(), communityId: communityId,
+          );
+          ref.invalidate(parkingsProvider);
+          if (ctx.mounted) Navigator.pop(ctx);
+        }),
+      ],
+    ));
+  }
+
+  Future<void> _addSpace(BuildContext ctx, String parkingId) async {
+    final num   = TextEditingController();
+    final label = TextEditingController();
+    final floor = TextEditingController();
+
+    await showDialog(context: ctx, builder: (_) => AlertDialog(
+      backgroundColor: AC.surface,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      title: const Text('Nueva plaza', style: TextStyle(color: AC.text1, fontFamily: 'SpaceGrotesk')),
+      content: SizedBox(width: 400, child: Column(mainAxisSize: MainAxisSize.min, children: [
+        AdminField(label: 'Número *', controller: num, prefixIcon: Icons.tag_rounded,
+            hint: 'B-07, P1-003, 42...'),
+        const SizedBox(height: 10),
+        AdminField(label: 'Etiqueta', controller: label, prefixIcon: Icons.label_outline,
+            hint: 'Nombre descriptivo opcional'),
+        const SizedBox(height: 10),
+        AdminField(label: 'Planta', controller: floor, prefixIcon: Icons.layers_rounded,
+            hint: 'B1, P2, Sótano...'),
+      ])),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(ctx),
+            child: const Text('Cancelar', style: TextStyle(color: AC.text2))),
+        AdminGradientButton(label: 'Añadir', onPressed: () async {
+          if (num.text.isEmpty) return;
+          await ref.read(adminServiceProvider).createSpace(
+            parkingId: parkingId, number: num.text.trim(),
+            label: label.text.isNotEmpty ? label.text.trim() : null,
+            floor: floor.text.isNotEmpty ? floor.text.trim() : null,
+          );
+          if (ctx.mounted) Navigator.pop(ctx);
+          _loadSpaces(parkingId);
+        }),
+      ],
+    ));
+  }
+}
+
+class _ParkingList extends StatelessWidget {
+  final AsyncValue<List<Map<String, dynamic>>> parkings;
+  final void Function(Map<String, dynamic>) onSelect;
+  const _ParkingList({required this.parkings, required this.onSelect});
+
+  @override
+  Widget build(BuildContext context) => parkings.when(
+    loading: () => const Center(child: CircularProgressIndicator(color: AC.brand1)),
+    error: (e, _) => AdminEmpty(icon: Icons.error_outline, title: 'Error', subtitle: '$e'),
+    data: (list) {
+      if (list.isEmpty) return const AdminEmpty(
+          icon: Icons.local_parking_rounded, title: 'Sin parkings',
+          subtitle: 'Añade el primer parking');
+      return ListView.separated(
+        padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+        itemCount: list.length,
+        separatorBuilder: (_, __) => const SizedBox(height: 8),
+        itemBuilder: (_, i) {
+          final p = list[i];
+          return AdminCard(child: ListTile(
+            contentPadding: EdgeInsets.zero,
+            leading: Container(width: 42, height: 42,
+              decoration: BoxDecoration(
+                color: AC.brand1.withOpacity(0.12), borderRadius: BorderRadius.circular(10)),
+              child: const Icon(Icons.local_parking_rounded, color: AC.brand1, size: 22)),
+            title: Text(p['name'] ?? '—', style: const TextStyle(fontSize: 14, fontWeight: FontWeight.w500,
+                color: AC.text1, fontFamily: 'SpaceGrotesk')),
+            subtitle: Text(
+              [p['address'], p['city'], p['communities']?['name']].where((v) => v != null).join(' · '),
+              style: const TextStyle(fontSize: 12, color: AC.text3, fontFamily: 'SpaceGrotesk')),
+            trailing: const Icon(Icons.chevron_right_rounded, color: AC.text3),
+            onTap: () => onSelect(p),
+          ));
+        },
+      );
+    },
+  );
+}
+
+class _SpaceList extends StatelessWidget {
+  final Map<String, dynamic> parking;
+  final List<Map<String, dynamic>> spaces;
+  final bool loading;
+  const _SpaceList({required this.parking, required this.spaces, required this.loading});
+
+  @override
+  Widget build(BuildContext context) {
+    if (loading) return const Center(child: CircularProgressIndicator(color: AC.brand1));
+    if (spaces.isEmpty) return const AdminEmpty(
+        icon: Icons.grid_view_rounded, title: 'Sin plazas',
+        subtitle: 'Añade la primera plaza de este parking');
+
+    return GridView.builder(
+      padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+      gridDelegate: const SliverGridDelegateWithMaxCrossAxisExtent(
+        maxCrossAxisExtent: 200, crossAxisSpacing: 10, mainAxisSpacing: 10, childAspectRatio: 1.4),
+      itemCount: spaces.length,
+      itemBuilder: (_, i) {
+        final s = spaces[i];
+        return AdminCard(child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(s['number'] ?? '—', style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700,
+                color: AC.text1, fontFamily: 'SpaceGrotesk')),
+            if (s['label'] != null)
+              Text(s['label'], style: const TextStyle(fontSize: 12, color: AC.text2, fontFamily: 'SpaceGrotesk')),
+            if (s['floor'] != null) ...[
+              const SizedBox(height: 6),
+              Row(children: [
+                const Icon(Icons.layers_rounded, size: 12, color: AC.text3),
+                const SizedBox(width: 4),
+                Text(s['floor'], style: const TextStyle(fontSize: 11, color: AC.text3)),
+              ]),
+            ],
+          ],
+        ));
+      },
+    );
+  }
+}
